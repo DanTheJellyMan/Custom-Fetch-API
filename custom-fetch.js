@@ -1,8 +1,26 @@
-// TODO: add checking for an Expires header for caching, if Cache-Content is missing
+/*
+    NOTES:
 
-// Consider implementing instantiation of CustomFetch objects,
-// instead of having everything static
-// to allow for multiple caching use cases.
+    The choice to not cache responses that expire at the exact current time/date is intentional.
+    
+    Consider implementing instantiation of CustomFetch objects,
+    instead of having everything static
+    to allow for multiple caching use cases.
+
+    The 'getCacheControlDirective' method may be overcomplicated, and
+    String.split might be a much more simple way of going about the string parsing.
+    Need to test for performance to justify changing it.
+*/
+
+/**
+ * @typedef {[CachedResponseKey, Response]} CachedResponse
+ */
+
+/**
+ * @typedef CachedResponseKey
+ * @property {string} resource
+ * @property {Object<string, any>} options
+ */
 
 /**
  * Allows for fetches with memory caching, allowing faster fetches within process lifetimes.
@@ -24,9 +42,7 @@ class CustomFetch {
     }
 
     /**
-     * Entry format:
-     * 
-     * [ { resource: string, options: {} }, Response ]
+     * @type {CachedResponse}
      */
     static cachedResponses = new Map();
     
@@ -35,18 +51,15 @@ class CustomFetch {
             return Promise.reject(`(${resource}) is an invalid resource to fetch.`);
         }
 
-        // Check cachedResponses for a matching resource response
         const key = JSON.stringify({ resource, options });
         const value = CustomFetch.cachedResponses.get(key);
-        if (value instanceof Headers && CustomFetch.isCacheExpired(value.headers)) {
-            CustomFetch.cachedResponses.delete(key);
-            return Promise.resolve(value);
+        if (value instanceof Response && !CustomFetch.isCacheExpired(value.headers)) {
+            return Promise.resolve(value.clone());
         }
-        const resPromise = globalThis.fetch(resource, options);
+
+        const resPromise = fetch(resource, options);
         resPromise.then(res => {
-            // Do not cache if Cache-Control doesn't say to
-            const cacheControl = res.headers.get("Cache-Control");
-            let shouldCache = CustomFetch.checkIfShouldCache(cacheControl);
+            let shouldCache = CustomFetch.checkIfShouldCache(res.headers);
             if (!shouldCache) return;
 
             const key = JSON.stringify({ resource, options });
@@ -59,7 +72,6 @@ class CustomFetch {
         const cached = CustomFetch.cachedResponses;
         for (const [key, response] of cached.entries()) {
             if (!CustomFetch.isCacheExpired(response.headers)) continue;
-            console.log(`deleting cache (${new Date()}): ${JSON.parse(key).resource}`);
             cached.delete(key);
         }
     }
@@ -71,27 +83,55 @@ class CustomFetch {
         
     }
 
+    /**
+     * @param {Headers} headers 
+     * @param {number} currentDate Optional, can set an arbitrary date to check from for expiration
+     * @returns {boolean}
+     */
     static isCacheExpired(headers, currentDate = Date.now()) {
-        const cacheControl = headers.get("Cache-Control") || "";
-        const maxAgeSeconds = parseInt(
-            CustomFetch.getCacheControlDirective(cacheControl, "max-age") || 0
-        ) * 1000;
-        const expireDate = Date.parse(headers.get("Date")) + maxAgeSeconds;
-        
-        if (currentDate > expireDate) {
+        const cacheControl = headers.get("Cache-Control");
+        const date = headers.get("Date");
+        const expires = headers.get("Expires");
+
+        if (cacheControl && date) {
+            const maxAgeSeconds = parseInt(
+                CustomFetch.getCacheControlDirective(cacheControl, "max-age") || 0
+            ) * 1000;
+            const expireDate = Date.parse(date) + maxAgeSeconds;
+            if (expireDate < currentDate) {
+                return true;
+            }
+        }
+
+        if (expires && Date.parse(expires) < currentDate) {
             return true;
         }
+        
         return false;
     }
 
-    static checkIfShouldCache(cacheControl) {
-        const noCache = CustomFetch.getCacheControlDirective(cacheControl, "no-cache");
-        const noStore = CustomFetch.getCacheControlDirective(cacheControl, "no-store");
-        const maxAge = CustomFetch.getCacheControlDirective(cacheControl, "max-age");
-        if (noCache === "no-cache" || noStore === "no-store" || maxAge === "0") {
-            return false;
+    /**
+     * @param {Headers} headers
+     * @param {number} currentDate Optional, used for comparing the Expires header date to an arbitrary (by default, the current) date
+     * @returns {boolean}
+     */
+    static checkIfShouldCache(headers, currentDate = Date.now()) {
+        const cacheControl = headers.get("Cache-Control");
+        if (cacheControl) {
+            const noCache = CustomFetch.getCacheControlDirective(cacheControl, "no-cache");
+            const noStore = CustomFetch.getCacheControlDirective(cacheControl, "no-store");
+            const maxAge = CustomFetch.getCacheControlDirective(cacheControl, "max-age");
+            if (noCache !== "no-cache" && noStore !== "no-store" && maxAge !== "0") {
+                return true;
+            }
         }
-        return true;
+
+        const expires = headers.get("Expires");
+        if (expires && Date.parse(expires) > currentDate) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -106,15 +146,20 @@ class CustomFetch {
      * getCacheControlDirective("no-cache, max-age=0", "invalid directive") -> null
      * @param {string} headerStr Header value
      * @param {string} targetDir Name of directive to get value of
+     * @param {number} maxIterationCount Optional, limits the amount of iteration through the header, as a safety against infinite iteration
      * @returns {string|null}
      */
-    static getCacheControlDirective(headerStr, targetDir) {
+    static getCacheControlDirective(headerStr, targetDir, maxIterationCount = Number.MAX_SAFE_INTEGER) {
         const dirSeparator = ",";
         const keyword = targetDir;
         let startIndex = headerStr.indexOf(keyword);
         let hasEqualSign = false;
+        let i = 0;
+
         while (true) {
             if (startIndex === -1) break;
+            if (i >= maxIterationCount) break;
+            i++;
 
             // Check if the correct dir was found by
             // looking both behind and ahead of the dir name
@@ -174,18 +219,3 @@ class CustomFetch {
 }
 
 module.exports = CustomFetch;
-
-const TESTING = true;
-if (TESTING) {
-    process.stdin.on("data", d => {
-        d = d.toString("utf8").trim();
-        if (d === "print cached") {
-            return console.log(CustomFetch.cachedResponses);
-        }
-        try {
-            eval(d);
-        } catch (err) {
-            console.error(new Error(err));
-        }
-    });
-}

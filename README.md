@@ -1,3 +1,1 @@
-This API is **not** intended for large amounts of fetch requests, as that can slowly begin to **hog up memory** if the cache takes a long time to expire.
-
-This API is mainly intended for <ins>*frequent*</ins> fetches of a *<sub>small</sub>* number of resources. The in-memory caching makes cached resource access ***very fast***, even faster than [make-fetch-happen](https://www.npmjs.com/package/make-fetch-happen) which stores cache on the drive.
+This API is **not** intended for large amounts of fetch requests to many different resources, as that can slowly begin to **hog up memory** if the cache takes a long time to expire. This API is mainly intended for <ins>*frequent*</ins> fetches of a *small* number of resources. The in-memory caching makes cached resource access very fast, even faster than [make-fetch-happen](https://www.npmjs.com/package/make-fetch-happen) which stores cache on the drive.
